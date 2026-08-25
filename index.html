@@ -42,6 +42,7 @@
     /* Cole abaixo as duas credenciais públicas do seu projeto Supabase. */
     const SUPABASE_URL='https://kytdbvkdkspjxnchdxji.supabase.co';
     const SUPABASE_ANON_KEY='sb_publishable_Ocs6-TzKrxcnZqSNLO5hGw_Djr_SNzp';
+    const VAPID_PUBLIC_KEY='BH9U_c94Y8z1aB-alARUfgf9OF7W7xx41-7PCpJ-6NK6yKa9Hlu2PxLUL4HTQ4A0uHuGFQTbufV5Y4cyWPV2qhg';
     const initialData=JSON.parse(JSON.stringify({categories:state.categories,items:state.items,profile:state.profile,settings:state.settings}));
     let auth={session:null,user:null,mode:'login',loading:true,sync:'idle',lastSync:null,error:''},syncTimer;
     const cloudReady=()=>/^https:\/\/.+\.supabase\.co$/.test(SUPABASE_URL)&&SUPABASE_ANON_KEY.length>40;
@@ -89,7 +90,7 @@
       }catch(err){auth.error=translateAuthError(err.message);render()}
     }
     function translateAuthError(msg){if(/invalid login/i.test(msg))return'E-mail ou senha incorretos.';if(/already registered/i.test(msg))return'Este e-mail já possui uma conta.';if(/password/i.test(msg))return'A senha deve ter pelo menos 6 caracteres.';return msg}
-    async function logout(){try{if(auth.session)await api('/auth/v1/logout',{method:'POST'})}catch{}storeSession(null);state={...state,...JSON.parse(JSON.stringify(initialData)),page:'dashboard'};auth.sync='idle';render()}
+    async function logout(){try{await unsubscribePush();if(auth.session)await api('/auth/v1/logout',{method:'POST'})}catch{}storeSession(null);state={...state,...JSON.parse(JSON.stringify(initialData)),page:'dashboard'};auth.sync='idle';render()}
     async function loadCloudState(){
       auth.sync='busy';render();
       try{
@@ -143,7 +144,22 @@
     function playSound(choice=state.settings.sound){if(!choice||choice===true)choice='gentle';if(choice==='none'||choice===false)return;if(choice==='custom'&&state.settings.customSound?.data){const media=new Audio(state.settings.customSound.data);media.play().catch(()=>toast('Toque em “Testar” uma vez para liberar o áudio',true));return}const C=window.AudioContext||window.webkitAudioContext,ctx=window.ordoAudioContext||(window.ordoAudioContext=new C()),patterns={gentle:[[660,.12],[880,.18]],bell:[[880,.1],[1175,.12],[880,.28]],digital:[[520,.08],[520,.08],[1040,.16]]},notes=patterns[choice]||patterns.gentle;ctx.resume();let at=ctx.currentTime;notes.forEach(([freq,dur])=>{const o=ctx.createOscillator(),g=ctx.createGain();o.type=choice==='digital'?'square':'sine';o.frequency.value=freq;g.gain.setValueAtTime(.0001,at);g.gain.exponentialRampToValueAtTime(.18,at+.015);g.gain.exponentialRampToValueAtTime(.0001,at+dur);o.connect(g).connect(ctx.destination);o.start(at);o.stop(at+dur);at+=dur+.05})}
     function uploadCustomSound(input){const f=input.files[0];if(!f)return;if(f.size>2097152||(!f.type.startsWith('audio/')&&f.type!=='video/mp4')){input.value='';return toast('Escolha um MP3, MP4 ou áudio de até 2 MB',true)}const r=new FileReader();r.onload=()=>{state.settings.customSound={name:f.name,data:r.result,type:f.type};state.settings.sound='custom';scheduleSync();render();playSound('custom');toast('Som personalizado adicionado')};r.readAsDataURL(f)}
     function removeCustomSound(){state.settings.customSound=null;if(state.settings.sound==='custom')state.settings.sound='gentle';scheduleSync();render();toast('Som personalizado removido')}
-    async function requestNotifications(){if(!('Notification'in window))return toast('Este navegador não oferece notificações',true);const p=await Notification.requestPermission();toast(p==='granted'?'Notificações ativadas':'Permissão não concedida',p!=='granted')}
+    function urlBase64ToUint8Array(value){const pad='='.repeat((4-value.length%4)%4),base64=(value+pad).replace(/-/g,'+').replace(/_/g,'/'),raw=atob(base64);return Uint8Array.from([...raw].map(c=>c.charCodeAt(0)))}
+    async function requestNotifications(){
+      if(!('Notification'in window)||!('serviceWorker'in navigator)||!('PushManager'in window))return toast('Este navegador não oferece notificações push',true);
+      try{
+        const p=await Notification.requestPermission();if(p!=='granted')return toast('Permissão não concedida',true);
+        const reg=await navigator.serviceWorker.ready;
+        let sub=await reg.pushManager.getSubscription();
+        if(!sub)sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:urlBase64ToUint8Array(VAPID_PUBLIC_KEY)});
+        await api('/rest/v1/ordo_push_subscriptions?on_conflict=endpoint',{method:'POST',body:{user_id:auth.user.id,endpoint:sub.endpoint,subscription:sub.toJSON(),timezone:Intl.DateTimeFormat().resolvedOptions().timeZone||'America/Fortaleza',enabled:true,updated_at:new Date().toISOString()},headers:{Prefer:'resolution=merge-duplicates,return=minimal'}});
+        state.settings.push=true;await saveCloudState();render();toast('Alarmes com o app fechado foram ativados');
+      }catch(err){console.error(err);toast('Não foi possível ativar os alarmes em segundo plano',true)}
+    }
+    async function unsubscribePush(){
+      if(!('serviceWorker'in navigator)||!auth.user)return;
+      try{const reg=await navigator.serviceWorker.ready,sub=await reg.pushManager.getSubscription();if(!sub)return;await api('/rest/v1/ordo_push_subscriptions?endpoint=eq.'+encodeURIComponent(sub.endpoint),{method:'DELETE'});await sub.unsubscribe()}catch{}
+    }
     function render(){if(!auth.session){$('#app').innerHTML=authScreen();return}let body={dashboard:dashboard,categories:categoriesPage,items:itemsPage,alerts:alertsPage,low:lowPage,profile:profilePage,settings:settingsPage}[state.page]||dashboard;$('#app').innerHTML=nav()+`<section class="main">${body()}</section>`}
     function modal(html,wide=false){$('#modalRoot').innerHTML=`<div class="modal-overlay" onclick="if(event.target===this)closeModal()"><div class="modal ${wide?'wide':''}" role="dialog" aria-modal="true">${html}</div></div>`}
     function closeModal(){const root=$('#modalRoot');if(root)root.innerHTML=''}
